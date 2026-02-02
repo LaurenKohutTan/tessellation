@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Square Cut-and-Slide Tessellation Builder (Quadrant IV)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+    .panel { border: 1px solid #ccc; border-radius: 12px; padding: 12px; }
+    canvas { border: 1px solid #aaa; border-radius: 10px; background: #fff; display: block; }
+    button { padding: 8px 10px; border-radius: 10px; border: 1px solid #bbb; background: #f7f7f7; cursor: pointer; }
+    button:hover { background: #efefef; }
+    label { display: inline-flex; gap: 8px; align-items: center; margin-right: 10px; }
+    input[type="number"] { width: 90px; }
+    .small { color: #555; font-size: 13px; line-height: 1.35; }
+    textarea { width: 100%; height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+    .mode { font-weight: 600; }
+    .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; border:1px solid #ddd; background:#fafafa; font-size: 12px; margin-left: 8px;}
+  </style>
+</head>
+<body>
+  <h2>Square Cut-and-Slide Tessellation Builder</h2>
+  <p class="small">
+    Start from a square. Click to add points that “cut” the <b>top</b> edge and the <b>right</b> edge.
+    Matching points are automatically translated to the <b>bottom</b> and <b>left</b> edges so the tile can tessellate by translation.
+    Coordinates output are shown in <b>Quadrant IV</b> (positive x, negative y).
+  </p>
+
+  <div class="row">
+    <div class="panel">
+      <h3>Canvas</h3>
+      <div class="small">
+        Mode:
+        <span class="mode" id="modeLabel">Top edge</span>
+        <span class="pill" id="modeHint">click inside top band</span>
+      </div>
+      <canvas id="c" width="520" height="520"></canvas>
+
+      <div style="margin-top:10px;">
+        <label>Square size
+          <input id="size" type="number" min="100" max="400" step="10" value="240" />
+        </label>
+        <label>Origin (x,y)
+          <input id="ox" type="number" step="10" value="120" />
+          <input id="oy" type="number" step="10" value="120" />
+        </label>
+        <button id="apply">Apply</button>
+      </div>
+
+      <div style="margin-top:10px;">
+        <button id="modeTop">Edit Top/Bottom</button>
+        <button id="modeRight">Edit Right/Left</button>
+        <button id="undo">Undo</button>
+        <button id="reset">Reset</button>
+      </div>
+
+      <p class="small" style="margin-top:10px;">
+        <b>How to use:</b><br/>
+        1) In <b>Top/Bottom</b> mode, click to add one or more points to shape the top edge (a “notch” or “tab”).<br/>
+        2) Switch to <b>Right/Left</b> mode and click to add points shaping the right edge.<br/>
+        The bottom/left get the matching translated points automatically.
+      </p>
+    </div>
+
+    <div class="panel" style="flex:1 1 420px;">
+      <h3>Quadrant IV Point List</h3>
+      <div class="small">
+        Output uses the math-style plane with +x right and +y up, but we report points in the <b>4th quadrant</b>:
+        <b>(x, -y)</b> relative to the square’s origin.
+      </div>
+      <textarea id="out" readonly></textarea>
+      <div style="margin-top:10px;">
+        <button id="copy">Copy polygon()</button>
+      </div>
+      <p class="small">
+        Tip: If you’re drawing on a canvas whose y increases downward, these points are already in the convenient “4th quadrant” form.
+      </p>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ----- Geometry model -----
+  // Square: origin (ox, oy) in canvas pixels, size S in pixels.
+  // We treat a local coordinate system with origin at the square's top-left corner.
+  // Local points: (x, y) where y grows DOWN (screen coords).
+  // For "Quadrant IV output", we convert to (x, -y).
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+
+  const modeLabel = document.getElementById('modeLabel');
+  const modeHint = document.getElementById('modeHint');
+  const out = document.getElementById('out');
+
+  let ox = 120, oy = 120, S = 240;
+
+  // Edges we edit:
+  // topCuts: points along the top boundary "detour" from left->right.
+  // rightCuts: points along the right boundary "detour" from top->bottom.
+  // Each stored as local points (x,y) INSIDE the square, but intended to replace part of the edge.
+  let topCuts = [];    // array of {x,y}
+  let rightCuts = [];  // array of {x,y}
+
+  // For undo:
+  let history = [];
+
+  // Modes:
+  // "top" means add points that will be used for top, mirrored to bottom by +S in y.
+  // "right" means add points used for right, mirrored to left by -S in x (implemented via translation).
+  let mode = "top";
+
+  // Bands (where clicks count) to reduce mistakes:
+  // In top mode, only accept clicks in top band: y in [0, S*0.45]
+  // In right mode, only accept clicks in right band: x in [S*0.55, S]
+  function inActiveBand(p) {
+    if (mode === "top") return p.y >= 0 && p.y <= S * 0.45;
+    return p.x >= S * 0.55 && p.x <= S;
+  }
+
+  function pushHistory() {
+    history.push({
+      topCuts: topCuts.map(p => ({...p})),
+      rightCuts: rightCuts.map(p => ({...p})),
+      mode
+    });
+    if (history.length > 50) history.shift();
+  }
+
+  function undo() {
+    const prev = history.pop();
+    if (!prev) return;
+    topCuts = prev.topCuts;
+    rightCuts = prev.rightCuts;
+    mode = prev.mode;
+    updateModeUI();
+    redraw();
+  }
+
+  function reset() {
+    topCuts = [];
+    rightCuts = [];
+    history = [];
+    redraw();
+  }
+
+  function setMode(m) {
+    mode = m;
+    updateModeUI();
+    redraw();
+  }
+
+  function updateModeUI() {
+    if (mode === "top") {
+      modeLabel.textContent = "Top edge";
+      modeHint.textContent = "click inside top band";
+    } else {
+      modeLabel.textContent = "Right edge";
+      modeHint.textContent = "click inside right band";
+    }
+  }
+
+  // ----- Construct final polygon boundary -----
+  // Base square corners (local):
+  const TL = () => ({x:0, y:0});
+  const TR = () => ({x:S, y:0});
+  const BR = () => ({x:S, y:S});
+  const BL = () => ({x:0, y:S});
+
+  // Build boundary in clockwise order:
+  // Start at TL -> go along TOP (with topCuts) to TR
+  // then RIGHT (with rightCuts) to BR
+  // then BOTTOM (mirror of topCuts, translated down by +S) from BR to BL
+  // then LEFT (mirror of rightCuts, translated left by -S) from BL to TL
+  //
+  // Important: the "mirrored" edges are not reflections — they are translations.
+  // Bottom path is the same sequence as topCuts, but shifted by (0, +S) and reversed direction.
+  // Left path is the same sequence as rightCuts, but shifted by (-S, 0) and reversed direction.
+
+  function sortTopCuts() {
+    // Sort by x (left->right), clamp inside [0,S]
+    topCuts.sort((a,b)=>a.x-b.x);
+  }
+
+  function sortRightCuts() {
+    // Sort by y (top->bottom)
+    rightCuts.sort((a,b)=>a.y-b.y);
+  }
+
+  function boundaryLocalPoints() {
+    sortTopCuts();
+    sortRightCuts();
+
+    const pts = [];
+    // Top: TL -> (topCuts...) -> TR
+    pts.push(TL());
+    for (const p of topCuts) pts.push({x: p.x, y: p.y});
+    pts.push(TR());
+
+    // Right: (rightCuts...) -> BR (starting at TR already)
+    for (const p of rightCuts) pts.push({x: p.x, y: p.y});
+    pts.push(BR());
+
+    // Bottom: mirror of topCuts by translation (0,+S), but travel BR -> BL
+    // Top went TL->TR. For bottom BR->BL we go reverse order:
+    for (let i = topCuts.length - 1; i >= 0; i--) {
+      const p = topCuts[i];
+      pts.push({x: p.x, y: p.y + S});
+    }
+    pts.push(BL());
+
+    // Left: mirror of rightCuts by translation (-S,0), travel BL -> TL
+    // Right went TR->BR (top->bottom). For left BL->TL we go reverse order:
+    for (let i = rightCuts.length - 1; i >= 0; i--) {
+      const p = rightCuts[i];
+      pts.push({x: p.x - S, y: p.y});
+    }
+    // Close is implicit; we can return without repeating TL
+    return pts;
+  }
+
+  // ----- Drawing -----
+  function drawGrid() {
+    ctx.save();
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // light grid
+    ctx.strokeStyle = "#eee";
+    ctx.lineWidth = 1;
+    for (let x=0; x<=canvas.width; x+=20) {
+      ctx.beginPath(); ctx.moveTo(x+0.5,0); ctx.lineTo(x+0.5,canvas.height); ctx.stroke();
+    }
+    for (let y=0; y<=canvas.height; y+=20) {
+      ctx.beginPath(); ctx.moveTo(0,y+0.5); ctx.lineTo(canvas.width,y+0.5); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawSquare() {
+    ctx.save();
+    ctx.strokeStyle = "#333";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(ox+0.5, oy+0.5, S, S);
+
+    // band hints
+    ctx.fillStyle = "rgba(80,120,255,0.08)";
+    // top band
+    ctx.fillRect(ox, oy, S, S*0.45);
+    // right band
+    ctx.fillRect(ox+S*0.55, oy, S*0.45, S);
+
+    // labels
+    ctx.fillStyle = "#333";
+    ctx.font = "12px system-ui";
+    ctx.fillText("Square start", ox+6, oy-8);
+    ctx.restore();
+  }
+
+  function drawPolygon() {
+    const pts = boundaryLocalPoints().map(p => ({x: ox+p.x, y: oy+p.y}));
+
+    ctx.save();
+    ctx.fillStyle = "rgba(200, 60, 60, 0.18)";
+    ctx.strokeStyle = "rgba(200, 60, 60, 0.9)";
+    ctx.lineWidth = 2;
+
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+
+    // Draw points (edited + generated) for clarity
+    ctx.save();
+    ctx.fillStyle = "#c00";
+    for (const p of pts) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3.2, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function redraw() {
+    drawGrid();
+    drawSquare();
+    drawPolygon();
+    updateOutput();
+  }
+
+  // ----- Output (Quadrant IV) -----
+  function updateOutput() {
+    const pts = boundaryLocalPoints();
+
+    // Convert to "Quadrant IV" relative to square origin:
+    // We keep x as is, y becomes negative (since local y is downward).
+    const q4 = pts.map(p => `(${round1(p.x)}, ${round1(-p.y)})`);
+
+    // Provide a clean polygon(...) string
+    const poly = "polygon(\n  " + q4.join(",\n  ") + "\n)";
+    out.value = poly;
+  }
+
+  function round1(n) {
+    // nice rounding (integers look clean)
+    const r = Math.round(n * 10) / 10;
+    return Number.isInteger(r) ? r.toString() : r.toString();
+  }
+
+  // ----- Click handling -----
+  function canvasToLocal(evt) {
+    const rect = canvas.getBoundingClientRect();
+    const cx = evt.clientX - rect.left;
+    const cy = evt.clientY - rect.top;
+    return { x: cx - ox, y: cy - oy };
+  }
+
+  function clampPoint(p) {
+    return {
+      x: Math.max(0, Math.min(S, p.x)),
+      y: Math.max(0, Math.min(S, p.y)),
+    };
+  }
+
+  function addPoint(local) {
+    const p = clampPoint(local);
+
+    if (!inActiveBand(p)) return;
+
+    pushHistory();
+
+    if (mode === "top") {
+      // lock to top edge "modification region": allow interior but keep within top band
+      topCuts.push(p);
+    } else {
+      rightCuts.push(p);
+    }
+    redraw();
+  }
+
+  canvas.addEventListener('click', (evt) => {
+    const local = canvasToLocal(evt);
+    // must click inside the square
+    if (local.x < 0 || local.x > S || local.y < 0 || local.y > S) return;
+    addPoint(local);
+  });
+
+  // ----- Controls -----
+  document.getElementById('modeTop').addEventListener('click', () => setMode("top"));
+  document.getElementById('modeRight').addEventListener('click', () => setMode("right"));
+  document.getElementById('undo').addEventListener('click', undo);
+  document.getElementById('reset').addEventListener('click', reset);
+
+  document.getElementById('apply').addEventListener('click', () => {
+    const ns = Number(document.getElementById('size').value);
+    const nox = Number(document.getElementById('ox').value);
+    const noy = Number(document.getElementById('oy').value);
+    S = Math.max(100, Math.min(400, ns));
+    ox = nox; oy = noy;
+
+    // Clamp existing points to new square size
+    topCuts = topCuts.map(clampPoint);
+    rightCuts = rightCuts.map(clampPoint);
+
+    redraw();
+  });
+
+  document.getElementById('copy').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(out.value);
+      alert("Copied polygon() to clipboard!");
+    } catch {
+      alert("Could not copy automatically. Select and copy from the box.");
+    }
+  });
+
+  updateModeUI();
+  redraw();
+})();
+</script>
+</body>
+</html>
