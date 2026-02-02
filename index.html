@@ -39,7 +39,7 @@
 
       <div style="margin-top:10px;">
         <label>Square size
-          <input id="size" type="number" min="100" max="400" step="10" value="240" />
+          <input id="size" type="number" min="100" max="400" step="10" value="100" />
         </label>
         <label>Origin (x,y)
           <input id="ox" type="number" step="10" value="120" />
@@ -94,12 +94,15 @@
   const modeHint = document.getElementById('modeHint');
   const out = document.getElementById('out');
 
-  let ox = 120, oy = 120, S = 240;
+  let ox = 120, oy = 120, S = 100;
+
+  // NEW: allow adding points a little outside the square
+  const PAD = 50; // pixels outside square allowed for edge edits
 
   // Edges we edit:
   // topCuts: points along the top boundary "detour" from left->right.
   // rightCuts: points along the right boundary "detour" from top->bottom.
-  // Each stored as local points (x,y) INSIDE the square, but intended to replace part of the edge.
+  // Each stored as local points (x,y) relative to square origin, allowed slightly outside via PAD.
   let topCuts = [];    // array of {x,y}
   let rightCuts = [];  // array of {x,y}
 
@@ -107,16 +110,19 @@
   let history = [];
 
   // Modes:
-  // "top" means add points that will be used for top, mirrored to bottom by +S in y.
-  // "right" means add points used for right, mirrored to left by -S in x (implemented via translation).
   let mode = "top";
 
-  // Bands (where clicks count) to reduce mistakes:
-  // In top mode, only accept clicks in top band: y in [0, S*0.45]
-  // In right mode, only accept clicks in right band: x in [S*0.55, S]
+  // Bands (where clicks count) to reduce mistakes, now extended by PAD outside.
   function inActiveBand(p) {
-    if (mode === "top") return p.y >= 0 && p.y <= S * 0.45;
-    return p.x >= S * 0.55 && p.x <= S;
+    if (mode === "top") {
+      // Accept points near the TOP edge, including up to PAD pixels above it
+      // x must stay within the tile width
+      return (p.x >= 0 && p.x <= S && p.y >= -PAD && p.y <= S * 0.45);
+    } else {
+      // Accept points near the RIGHT edge, including up to PAD pixels to the right
+      // y must stay within the tile height
+      return (p.y >= 0 && p.y <= S && p.x >= S * 0.55 && p.x <= S + PAD);
+    }
   }
 
   function pushHistory() {
@@ -154,69 +160,48 @@
   function updateModeUI() {
     if (mode === "top") {
       modeLabel.textContent = "Top edge";
-      modeHint.textContent = "click inside top band";
+      modeHint.textContent = `click top band (incl. ${PAD}px above)`;
     } else {
       modeLabel.textContent = "Right edge";
-      modeHint.textContent = "click inside right band";
+      modeHint.textContent = `click right band (incl. ${PAD}px outside)`;
     }
   }
 
   // ----- Construct final polygon boundary -----
-  // Base square corners (local):
   const TL = () => ({x:0, y:0});
   const TR = () => ({x:S, y:0});
   const BR = () => ({x:S, y:S});
   const BL = () => ({x:0, y:S});
 
-  // Build boundary in clockwise order:
-  // Start at TL -> go along TOP (with topCuts) to TR
-  // then RIGHT (with rightCuts) to BR
-  // then BOTTOM (mirror of topCuts, translated down by +S) from BR to BL
-  // then LEFT (mirror of rightCuts, translated left by -S) from BL to TL
-  //
-  // Important: the "mirrored" edges are not reflections — they are translations.
-  // Bottom path is the same sequence as topCuts, but shifted by (0, +S) and reversed direction.
-  // Left path is the same sequence as rightCuts, but shifted by (-S, 0) and reversed direction.
-
-  function sortTopCuts() {
-    // Sort by x (left->right), clamp inside [0,S]
-    topCuts.sort((a,b)=>a.x-b.x);
-  }
-
-  function sortRightCuts() {
-    // Sort by y (top->bottom)
-    rightCuts.sort((a,b)=>a.y-b.y);
-  }
+  function sortTopCuts() { topCuts.sort((a,b)=>a.x-b.x); }
+  function sortRightCuts() { rightCuts.sort((a,b)=>a.y-b.y); }
 
   function boundaryLocalPoints() {
     sortTopCuts();
     sortRightCuts();
 
     const pts = [];
-    // Top: TL -> (topCuts...) -> TR
+    // Top
     pts.push(TL());
     for (const p of topCuts) pts.push({x: p.x, y: p.y});
     pts.push(TR());
 
-    // Right: (rightCuts...) -> BR (starting at TR already)
+    // Right
     for (const p of rightCuts) pts.push({x: p.x, y: p.y});
     pts.push(BR());
 
-    // Bottom: mirror of topCuts by translation (0,+S), but travel BR -> BL
-    // Top went TL->TR. For bottom BR->BL we go reverse order:
+    // Bottom: translate topCuts down by +S and reverse
     for (let i = topCuts.length - 1; i >= 0; i--) {
       const p = topCuts[i];
       pts.push({x: p.x, y: p.y + S});
     }
     pts.push(BL());
 
-    // Left: mirror of rightCuts by translation (-S,0), travel BL -> TL
-    // Right went TR->BR (top->bottom). For left BL->TL we go reverse order:
+    // Left: translate rightCuts left by -S and reverse
     for (let i = rightCuts.length - 1; i >= 0; i--) {
       const p = rightCuts[i];
       pts.push({x: p.x - S, y: p.y});
     }
-    // Close is implicit; we can return without repeating TL
     return pts;
   }
 
@@ -225,7 +210,6 @@
     ctx.save();
     ctx.clearRect(0,0,canvas.width,canvas.height);
 
-    // light grid
     ctx.strokeStyle = "#eee";
     ctx.lineWidth = 1;
     for (let x=0; x<=canvas.width; x+=20) {
@@ -243,14 +227,13 @@
     ctx.lineWidth = 2;
     ctx.strokeRect(ox+0.5, oy+0.5, S, S);
 
-    // band hints
+    // band hints (including PAD outside)
     ctx.fillStyle = "rgba(80,120,255,0.08)";
-    // top band
-    ctx.fillRect(ox, oy, S, S*0.45);
-    // right band
-    ctx.fillRect(ox+S*0.55, oy, S*0.45, S);
+    // Top band: y from -PAD to S*0.45
+    ctx.fillRect(ox, oy - PAD, S, S * 0.45 + PAD);
+    // Right band: x from S*0.55 to S+PAD
+    ctx.fillRect(ox + S * 0.55, oy, S * 0.45 + PAD, S);
 
-    // labels
     ctx.fillStyle = "#333";
     ctx.font = "12px system-ui";
     ctx.fillText("Square start", ox+6, oy-8);
@@ -273,7 +256,6 @@
     ctx.stroke();
     ctx.restore();
 
-    // Draw points (edited + generated) for clarity
     ctx.save();
     ctx.fillStyle = "#c00";
     for (const p of pts) {
@@ -294,18 +276,12 @@
   // ----- Output (Quadrant IV) -----
   function updateOutput() {
     const pts = boundaryLocalPoints();
-
-    // Convert to "Quadrant IV" relative to square origin:
-    // We keep x as is, y becomes negative (since local y is downward).
     const q4 = pts.map(p => `(${round1(p.x)}, ${round1(-p.y)})`);
-
-    // Provide a clean polygon(...) string
     const poly = "polygon(\n  " + q4.join(",\n  ") + "\n)";
     out.value = poly;
   }
 
   function round1(n) {
-    // nice rounding (integers look clean)
     const r = Math.round(n * 10) / 10;
     return Number.isInteger(r) ? r.toString() : r.toString();
   }
@@ -320,32 +296,28 @@
 
   function clampPoint(p) {
     return {
-      x: Math.max(0, Math.min(S, p.x)),
-      y: Math.max(0, Math.min(S, p.y)),
+      x: Math.max(-PAD, Math.min(S + PAD, p.x)),
+      y: Math.max(-PAD, Math.min(S + PAD, p.y)),
     };
   }
 
   function addPoint(local) {
     const p = clampPoint(local);
-
     if (!inActiveBand(p)) return;
 
     pushHistory();
 
-    if (mode === "top") {
-      // lock to top edge "modification region": allow interior but keep within top band
-      topCuts.push(p);
-    } else {
-      rightCuts.push(p);
-    }
+    if (mode === "top") topCuts.push(p);
+    else rightCuts.push(p);
+
     redraw();
   }
 
   canvas.addEventListener('click', (evt) => {
     const local = canvasToLocal(evt);
-    // must click inside the square
-    if (local.x < 0 || local.x > S || local.y < 0 || local.y > S) return;
-    addPoint(local);
+    const p = clampPoint(local);
+    if (!inActiveBand(p)) return;
+    addPoint(p);
   });
 
   // ----- Controls -----
@@ -361,7 +333,6 @@
     S = Math.max(100, Math.min(400, ns));
     ox = nox; oy = noy;
 
-    // Clamp existing points to new square size
     topCuts = topCuts.map(clampPoint);
     rightCuts = rightCuts.map(clampPoint);
 
