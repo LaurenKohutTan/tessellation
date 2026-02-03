@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hexagon Tessellation Builder</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f0f0f0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Top Control Bar */
+        .controls {
+            background: white;
+            padding: 12px 20px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            z-index: 10;
+        }
+
+        h1 { margin: 0; font-size: 1.1rem; color: #333; margin-right: 20px; }
+
+        button {
+            padding: 8px 16px;
+            cursor: pointer;
+            background: #fff;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            transition: background 0.2s;
+        }
+        button:hover { background: #f5f5f5; }
+        
+        /* Slider styling */
+        label { font-size: 0.9rem; font-weight: 500; color: #555; display: flex; align-items: center; gap: 8px;}
+        input[type="range"] { cursor: pointer; }
+
+        .hint { color: #666; font-size: 0.85em; margin-left: auto; }
+
+        /* Main Canvas Area */
+        .workspace {
+            flex: 1;
+            position: relative;
+            background: #fafafa;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            cursor: crosshair;
+            /* Simple background pattern */
+            background-image: radial-gradient(#ddd 1px, transparent 1px);
+            background-size: 20px 20px;
+        }
+
+        /* Floating Code Output Box */
+        .code-panel {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 320px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            border: 1px solid #e5e7eb;
+            display: flex;
+            flex-direction: column;
+            padding: 15px;
+            max-height: 40vh;
+        }
+
+        .code-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .code-title { font-weight: 700; font-size: 0.9rem; color: #333; }
+
+        textarea {
+            flex: 1;
+            resize: none;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 0.75rem;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: #f8f9fa;
+            color: #444;
+            margin-bottom: 8px;
+            white-space: pre;
+            overflow-y: auto;
+        }
+
+        .copy-btn {
+            width: 100%;
+            background: #2563eb;
+            color: white;
+            border: none;
+        }
+        .copy-btn:hover { background: #1d4ed8; }
+
+    </style>
+</head>
+<body>
+
+    <div class="controls">
+        <h1>Hexagon Builder</h1>
+        <button onclick="resetShape()">Reset Shape</button>
+        <button onclick="undo()">Undo</button>
+        <label>Zoom: <input type="range" id="zoomSlider" min="30" max="150" value="80"></label>
+        <span class="hint">Click the <strong>Red</strong>, <strong>Green</strong>, or <strong>Blue</strong> lines to edit.</span>
+    </div>
+
+    <div class="workspace" id="workspace">
+        <canvas id="canvas"></canvas>
+        
+        <div class="code-panel">
+            <div class="code-header">
+                <span class="code-title">Output Coordinates (Quadrant IV)</span>
+            </div>
+            <textarea id="output" readonly></textarea>
+            <button class="copy-btn" onclick="copyCode()">Copy to Clipboard</button>
+        </div>
+    </div>
+
+<script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const workspace = document.getElementById('workspace');
+    const outputArea = document.getElementById('output');
+    const zoomSlider = document.getElementById('zoomSlider');
+
+    // --- Configuration ---
+    let width, height, cx, cy;
+    let radius = 80; // Hexagon radius
+    
+    // We edit 3 edges (0, 1, 2). 
+    // Edges 3, 4, 5 are automatically derived partners.
+    let edgePoints = { 
+        0: [], // Top-Right (Red)
+        1: [], // Right Vertical (Green)
+        2: []  // Bottom-Right (Blue)
+    };
+    
+    let historyStack = [];
+    const colors = ["#ef4444", "#22c55e", "#3b82f6"]; // Colors for the 3 editable sides
+
+    // --- Initialization ---
+    function resize() {
+        width = workspace.clientWidth;
+        height = workspace.clientHeight;
+        canvas.width = width;
+        canvas.height = height;
+        cx = width / 2;
+        cy = height / 2;
+        render();
+    }
+    window.addEventListener('resize', resize);
+    
+    // --- Geometry Logic ---
+
+    // Get vertices for a Pointy-Topped Hexagon
+    // Angles: 30, 90, 150, 210, 270, 330
+    // But to make edge 1 vertical, we use Flat-Topped logic?
+    // Let's use POINTY TOP. Vertices at 30, 90, 150...
+    // Vert 0: (w, -h). 30 deg.
+    // Wait, let's align strictly.
+    // Vertex 0: Top (0, -r)
+    // Vertex 1: Top-Right (w, -r/2)
+    // Vertex 2: Bottom-Right (w, r/2)
+    // Vertex 3: Bottom (0, r)
+    // Vertex 4: Bottom-Left (-w, r/2)
+    // Vertex 5: Top-Left (-w, -r/2)
+    function getHexVerts(cx, cy, r) {
+        const h = r * Math.sin(Math.PI/6); // r * 0.5
+        const w = r * Math.cos(Math.PI/6); // r * 0.866
+        
+        return [
+            {x: cx + 0,  y: cy - r},      // 0: Top
+            {x: cx + w,  y: cy - h},      // 1: Top Right
+            {x: cx + w,  y: cy + h},      // 2: Bottom Right
+            {x: cx + 0,  y: cy + r},      // 3: Bottom
+            {x: cx - w,  y: cy + h},      // 4: Bottom Left
+            {x: cx - w,  y: cy - h}       // 5: Top Left
+        ];
+    }
+
+    // Determine grid locations (Axial coordinates -> Pixel coordinates)
+    function hexToPixel(q, r_ax, size) {
+        const w = size * Math.cos(Math.PI/6); 
+        // Horizontal distance between centers is 2*w
+        // Vertical distance is 1.5 * size
+        // This is for pointy top.
+        // Let's use the vectors derived from the edges to be 100% sure.
+        
+        // Vector for "Right" neighbor (Vertical edge shared): (2w, 0)
+        // Vector for "Bottom-Right" neighbor: (w, 1.5r)
+        
+        const x = size * Math.sqrt(3) * (q + r_ax/2);
+        const y = size * 3/2 * r_ax;
+        return {x: cx + x, y: cy + y};
+    }
+
+    // --- Rendering ---
+    function render() {
+        ctx.clearRect(0, 0, width, height);
+
+        // Define Grid Range based on screen size to fill it
+        // A 5x5 grid usually covers most screens at standard zoom
+        const range = 3; 
+
+        // Draw Neighbors first (Ghosts)
+        for (let q = -range; q <= range; q++) {
+            for (let r_ax = -range; r_ax <= range; r_ax++) {
+                // Determine if this hex is on screen? 
+                // Just draw a fixed patch for now
+                if (q === 0 && r_ax === 0) continue; // Skip center
+                
+                // Hexagon axial distance check to make a circle-ish shape
+                if (Math.abs(q + r_ax) > range) continue;
+
+                const center = hexToPixel(q, r_ax, radius);
+                drawHexagon(center.x, center.y, false);
+            }
+        }
+
+        // Draw Center (Active)
+        drawHexagon(cx, cy, true);
+        
+        updateCode();
+    }
+
+    function drawHexagon(x, y, isActive) {
+        const verts = getHexVerts(x, y, radius);
+        const baseVerts = getHexVerts(0, 0, radius); // relative to 0,0 for vectors
+
+        ctx.beginPath();
+
+        // -- EDGE 0: Top -> Top-Right (Editable Red) --
+        ctx.moveTo(verts[0].x, verts[0].y);
+        drawDeformedLine(x, y, edgePoints[0], false);
+        ctx.lineTo(verts[1].x, verts[1].y);
+
+        // -- EDGE 1: Top-Right -> Bottom-Right (Editable Green) --
+        drawDeformedLine(x, y, edgePoints[1], false);
+        ctx.lineTo(verts[2].x, verts[2].y);
+
+        // -- EDGE 2: Bottom-Right -> Bottom (Editable Blue) --
+        drawDeformedLine(x, y, edgePoints[2], false);
+        ctx.lineTo(verts[3].x, verts[3].y);
+
+        // -- EDGE 3: Bottom -> Bottom-Left (Partner of Edge 0) --
+        // Vector: Center of Edge 0 to Center of Edge 3?
+        // Edge 0 is Top-Rightish. Edge 3 is Bottom-Leftish.
+        // They are parallel opposite. 
+        // Translation Vector: from Start(0) to End(3)? No.
+        // Translation Vector = (Bottom-Left Neighbor Position) - (Center).
+        // Neighbor BL is at q=-1, r=1.
+        // Vector = hexToPixel(-1, 1, radius) - (cx,cy).
+        const vec0 = getTranslationVector(-1, 1); 
+        drawDeformedLine(x, y, edgePoints[0], true, vec0);
+        ctx.lineTo(verts[4].x, verts[4].y);
+
+        // -- EDGE 4: Bottom-Left -> Top-Left (Partner of Edge 1) --
+        // Edge 1 is Vertical Right. Edge 4 is Vertical Left.
+        // Partner is Left neighbor (q=-1, r=0).
+        const vec1 = getTranslationVector(-1, 0);
+        drawDeformedLine(x, y, edgePoints[1], true, vec1);
+        ctx.lineTo(verts[5].x, verts[5].y);
+
+        // -- EDGE 5: Top-Left -> Top (Partner of Edge 2) --
+        // Edge 2 is Bottom-Rightish. Edge 5 is Top-Leftish.
+        // Partner is Top-Left neighbor (q=0, r=-1).
+        const vec2 = getTranslationVector(0, -1);
+        drawDeformedLine(x, y, edgePoints[2], true, vec2);
+        ctx.lineTo(verts[0].x, verts[0].y); // Close loop
+
+        ctx.closePath();
+
+        // Style
+        if (isActive) {
+            ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = "#222";
+            ctx.stroke();
+
+            // Colored Highlights on Active Edges
+            highlight(verts[0], verts[1], colors[0]); // Red
+            highlight(verts[1], verts[2], colors[1]); // Green
+            highlight(verts[2], verts[3], colors[2]); // Blue
+        } else {
+            // Neighbor Style
+            ctx.fillStyle = "rgba(200, 200, 200, 0.3)";
+            ctx.fill();
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "#aaa";
+            ctx.stroke();
+        }
+    }
+
+    function getTranslationVector(q, r_ax) {
+        const p = hexToPixel(q, r_ax, radius);
+        return { x: p.x - cx, y: p.y - cy };
+    }
+
+    function drawDeformedLine(cx, cy, points, isPartner, vec) {
+        if (!points || points.length === 0) return;
+
+        let ptrs = points;
+        
+        // If partner, reverse points and shift by vector
+        // Wait, for pure translation (sliding), orientation stays same?
+        // Edge 0 goes L->R. Edge 3 (Partner) goes R->L.
+        // If we just translate, the shape is preserved, but we are drawing the perimeter.
+        // Since we are drawing perimeter clockwise, Edge 3 is traversed opposite to Edge 0.
+        // So yes, we must REVERSE the points for the partner edge.
+        if (isPartner) {
+            ptrs = [...points].reverse();
+            ptrs.forEach(p => {
+                ctx.lineTo(cx + p.x + vec.x, cy + p.y + vec.y);
+            });
+        } else {
+            ptrs.forEach(p => {
+                ctx.lineTo(cx + p.x, cy + p.y);
+            });
+        }
+    }
+
+    function highlight(p1, p2, color) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = color;
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    // --- Interaction ---
+
+    canvas.addEventListener('mousedown', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+
+        // Check Edges 0, 1, 2
+        const verts = getHexVerts(cx, cy, radius);
+        const edges = [
+            {id: 0, p1: verts[0], p2: verts[1]},
+            {id: 1, p1: verts[1], p2: verts[2]},
+            {id: 2, p1: verts[2], p2: verts[3]}
+        ];
+
+        let clicked = null;
+        let minD = 40; // Hitbox
+
+        edges.forEach(edge => {
+            const d = distToSegment(mx, my, edge.p1.x, edge.p1.y, edge.p2.x, edge.p2.y);
+            if (d < minD) {
+                minD = d;
+                clicked = edge.id;
+            }
+        });
+
+        if (clicked !== null) {
+            saveState();
+            // Store point relative to center
+            edgePoints[clicked].push({ x: mx - cx, y: my - cy });
+            sortPoints(clicked);
+            render();
+        }
+    });
+
+    function distToSegment(px, py, x1, y1, x2, y2) {
+        let l2 = (x1-x2)**2 + (y1-y2)**2;
+        if (l2 == 0) return Math.hypot(px-x1, py-y1);
+        let t = ((px-x1)*(x2-x1) + (py-y1)*(y2-y1)) / l2;
+        t = Math.max(0, Math.min(1, t));
+        return Math.hypot(px - (x1 + t*(x2-x1)), py - (y1 + t*(y2-y1)));
+    }
+
+    function sortPoints(id) {
+        const verts = getHexVerts(0, 0, radius);
+        const start = verts[id];
+        edgePoints[id].sort((a,b) => {
+            return ((a.x - start.x)**2 + (a.y - start.y)**2) - 
+                   ((b.x - start.x)**2 + (b.y - start.y)**2);
+        });
+    }
+
+    // --- Controls ---
+
+    function saveState() {
+        if(historyStack.length > 20) historyStack.shift();
+        historyStack.push(JSON.parse(JSON.stringify(edgePoints)));
+    }
+    
+    function undo() {
+        if(historyStack.length > 0) {
+            edgePoints = historyStack.pop();
+            render();
+        }
+    }
+
+    function resetShape() {
+        saveState();
+        edgePoints = {0:[], 1:[], 2:[]};
+        render();
+    }
+
+    zoomSlider.addEventListener('input', (e) => {
+        radius = parseInt(e.target.value);
+        render();
+    });
+
+    // --- Output ---
+    function updateCode() {
+        // Output polygon coordinates in Quadrant IV format (y flipped)
+        // We only output the vertices of the "Base" hexagon for now,
+        // plus the user points inserted in order.
+        
+        let out = "polygon(\n";
+        
+        // This is a simplified output. A full output would need to traverse
+        // all 6 sides, calculate vectors, and list every single point.
+        // For brevity in this UI, let's list the key vertices to show it works.
+        const verts = getHexVerts(0, 0, radius);
+        
+        // NOTE: To get the full shape code, we'd iterate exactly like drawHexagon
+        // but pushing to a string instead of ctx.lineTo.
+        // Let's do a quick loop to be helpful.
+        
+        const processSide = (p1, p2, pts, isPartner, vec) => {
+            let list = pts ? [...pts] : [];
+            if(isPartner) {
+                list.reverse();
+                list.forEach(p => {
+                    let rx = Math.round(p.x + vec.x);
+                    let ry = Math.round(-(p.y + vec.y)); // Invert Y
+                    out += `  (${rx}, ${ry}),\n`;
+                });
+            } else {
+                list.forEach(p => {
+                    let rx = Math.round(p.x);
+                    let ry = Math.round(-p.y);
+                    out += `  (${rx}, ${ry}),\n`;
+                });
+            }
+        };
+        
+        // Vert 0
+        out += `  (${Math.round(verts[0].x)}, ${Math.round(-verts[0].y)}),\n`;
+        // Side 0 points
+        processSide(null, null, edgePoints[0], false, null);
+        
+        // Vert 1
+        out += `  (${Math.round(verts[1].x)}, ${Math.round(-verts[1].y)}),\n`;
+        processSide(null, null, edgePoints[1], false, null);
+        
+        // Vert 2
+        out += `  (${Math.round(verts[2].x)}, ${Math.round(-verts[2].y)}),\n`;
+        processSide(null, null, edgePoints[2], false, null);
+
+        // Vert 3
+        out += `  (${Math.round(verts[3].x)}, ${Math.round(-verts[3].y)}),\n`;
+        // Partner 0 (Side 3)
+        processSide(null, null, edgePoints[0], true, getTranslationVector(-1, 1));
+
+        // Vert 4
+        out += `  (${Math.round(verts[4].x)}, ${Math.round(-verts[4].y)}),\n`;
+        // Partner 1 (Side 4)
+        processSide(null, null, edgePoints[1], true, getTranslationVector(-1, 0));
+
+        // Vert 5
+        out += `  (${Math.round(verts[5].x)}, ${Math.round(-verts[5].y)}),\n`;
+        // Partner 2 (Side 5)
+        processSide(null, null, edgePoints[2], true, getTranslationVector(0, -1));
+
+        out += ")";
+        outputArea.value = out;
+    }
+
+    function copyCode() {
+        outputArea.select();
+        document.execCommand('copy');
+    }
+
+    resize(); // Start
+
+</script>
+</body>
+</html>
