@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Square Cut-and-Slide Tessellation Builder (Quadrant IV)</title>
+  <title>Rectangle Cut-and-Slide Tessellation Builder (Quadrant IV)</title>
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; }
     .row { display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
@@ -11,18 +11,18 @@
     canvas { border: 1px solid #aaa; border-radius: 10px; background: #fff; display: block; }
     button { padding: 8px 10px; border-radius: 10px; border: 1px solid #bbb; background: #f7f7f7; cursor: pointer; }
     button:hover { background: #efefef; }
-    label { display: inline-flex; gap: 8px; align-items: center; margin-right: 10px; }
+    label { display: inline-flex; gap: 8px; align-items: center; margin-right: 10px; flex-wrap: wrap; }
     input[type="number"] { width: 90px; }
     .small { color: #555; font-size: 13px; line-height: 1.35; }
-    textarea { width: 100%; height: 180px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+    textarea { width: 100%; height: 200px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
     .mode { font-weight: 600; }
     .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; border:1px solid #ddd; background:#fafafa; font-size: 12px; margin-left: 8px;}
   </style>
 </head>
 <body>
-  <h2>Square Cut-and-Slide Tessellation Builder</h2>
+  <h2>Rectangle Cut-and-Slide Tessellation Builder</h2>
   <p class="small">
-    Start from a square. Click to add points that “cut” the <b>top</b> edge and the <b>right</b> edge.
+    Start from a rectangle. Click to add points that “cut” the <b>top</b> edge and the <b>right</b> edge.
     Matching points are automatically translated to the <b>bottom</b> and <b>left</b> edges so the tile can tessellate by translation.
     Coordinates output are shown in <b>Quadrant IV</b> (positive x, negative y).
   </p>
@@ -38,8 +38,11 @@
       <canvas id="c" width="520" height="520"></canvas>
 
       <div style="margin-top:10px;">
-        <label>Square size
-          <input id="size" type="number" min="100" max="400" step="10" value="100" />
+        <label>Width
+          <input id="w" type="number" min="50" max="450" step="10" value="100" />
+        </label>
+        <label>Height
+          <input id="h" type="number" min="50" max="450" step="10" value="100" />
         </label>
         <label>Origin (x,y)
           <input id="ox" type="number" step="10" value="120" />
@@ -57,9 +60,10 @@
 
       <p class="small" style="margin-top:10px;">
         <b>How to use:</b><br/>
-        1) In <b>Top/Bottom</b> mode, click to add one or more points to shape the top edge (a “notch” or “tab”).<br/>
+        1) In <b>Top/Bottom</b> mode, click to add points to shape the top edge (a “notch” or “tab”).<br/>
         2) Switch to <b>Right/Left</b> mode and click to add points shaping the right edge.<br/>
-        The bottom/left get the matching translated points automatically.
+        The bottom/left get the matching translated points automatically.<br/>
+        <b>Translation vectors:</b> ⟨W,0⟩ and ⟨0,H⟩.
       </p>
     </div>
 
@@ -67,26 +71,20 @@
       <h3>Quadrant IV Point List</h3>
       <div class="small">
         Output uses the math-style plane with +x right and +y up, but we report points in the <b>4th quadrant</b>:
-        <b>(x, -y)</b> relative to the square’s origin.
+        <b>(x, -y)</b> relative to the rectangle’s origin.
       </div>
       <textarea id="out" readonly></textarea>
       <div style="margin-top:10px;">
         <button id="copy">Copy polygon()</button>
       </div>
       <p class="small">
-        Tip: If you’re drawing on a canvas whose y increases downward, these points are already in the convenient “4th quadrant” form.
+        Tip: If your drawing canvas uses y increasing downward, these points are already in the convenient “4th quadrant” form.
       </p>
     </div>
   </div>
 
 <script>
 (() => {
-  // ----- Geometry model -----
-  // Square: origin (ox, oy) in canvas pixels, size S in pixels.
-  // We treat a local coordinate system with origin at the square's top-left corner.
-  // Local points: (x, y) where y grows DOWN (screen coords).
-  // For "Quadrant IV output", we convert to (x, -y).
-
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
 
@@ -94,42 +92,28 @@
   const modeHint = document.getElementById('modeHint');
   const out = document.getElementById('out');
 
-  let ox = 120, oy = 120, S = 100;
+  // Origin in canvas pixels
+  let ox = 120, oy = 120;
 
-  // NEW: allow adding points a little outside the square
-  const PAD = 50; // pixels outside square allowed for edge edits
+  // Rectangle dimensions (local coords)
+  let W = 100, H = 100;
 
-  // Edges we edit:
-  // topCuts: points along the top boundary "detour" from left->right.
-  // rightCuts: points along the right boundary "detour" from top->bottom.
-  // Each stored as local points (x,y) relative to square origin, allowed slightly outside via PAD.
-  let topCuts = [];    // array of {x,y}
-  let rightCuts = [];  // array of {x,y}
+  // Allow editing slightly outside the rectangle
+  const PAD = 50;
 
-  // For undo:
+  // Cut points (local coords, y down)
+  let topCuts = [];
+  let rightCuts = [];
+
   let history = [];
-
-  // Modes:
-  let mode = "top";
-
-  // Bands (where clicks count) to reduce mistakes, now extended by PAD outside.
-  function inActiveBand(p) {
-    if (mode === "top") {
-      // Accept points near the TOP edge, including up to PAD pixels above it
-      // x must stay within the tile width
-      return (p.x >= 0 && p.x <= S && p.y >= -PAD && p.y <= S * 0.45);
-    } else {
-      // Accept points near the RIGHT edge, including up to PAD pixels to the right
-      // y must stay within the tile height
-      return (p.y >= 0 && p.y <= S && p.x >= S * 0.55 && p.x <= S + PAD);
-    }
-  }
+  let mode = "top"; // "top" or "right"
 
   function pushHistory() {
     history.push({
       topCuts: topCuts.map(p => ({...p})),
       rightCuts: rightCuts.map(p => ({...p})),
-      mode
+      mode,
+      W, H, ox, oy
     });
     if (history.length > 50) history.shift();
   }
@@ -140,6 +124,12 @@
     topCuts = prev.topCuts;
     rightCuts = prev.rightCuts;
     mode = prev.mode;
+    W = prev.W; H = prev.H; ox = prev.ox; oy = prev.oy;
+    // update inputs to match undo state
+    document.getElementById('w').value = W;
+    document.getElementById('h').value = H;
+    document.getElementById('ox').value = ox;
+    document.getElementById('oy').value = oy;
     updateModeUI();
     redraw();
   }
@@ -167,45 +157,64 @@
     }
   }
 
-  // ----- Construct final polygon boundary -----
-  const TL = () => ({x:0, y:0});
-  const TR = () => ({x:S, y:0});
-  const BR = () => ({x:S, y:S});
-  const BL = () => ({x:0, y:S});
+  // Accept clicks near the relevant edge (extended by PAD)
+  function inActiveBand(p) {
+    if (mode === "top") {
+      // x in [0, W], y in [-PAD, 0.45H]
+      return (p.x >= 0 && p.x <= W && p.y >= -PAD && p.y <= H * 0.45);
+    } else {
+      // y in [0, H], x in [0.55W, W+PAD]
+      return (p.y >= 0 && p.y <= H && p.x >= W * 0.55 && p.x <= W + PAD);
+    }
+  }
+
+  function clampPoint(p) {
+    return {
+      x: Math.max(-PAD, Math.min(W + PAD, p.x)),
+      y: Math.max(-PAD, Math.min(H + PAD, p.y)),
+    };
+  }
 
   function sortTopCuts() { topCuts.sort((a,b)=>a.x-b.x); }
   function sortRightCuts() { rightCuts.sort((a,b)=>a.y-b.y); }
+
+  // Rectangle corners (local)
+  const TL = () => ({x:0, y:0});
+  const TR = () => ({x:W, y:0});
+  const BR = () => ({x:W, y:H});
+  const BL = () => ({x:0, y:H});
 
   function boundaryLocalPoints() {
     sortTopCuts();
     sortRightCuts();
 
     const pts = [];
-    // Top
+
+    // Top: TL -> cuts -> TR
     pts.push(TL());
     for (const p of topCuts) pts.push({x: p.x, y: p.y});
     pts.push(TR());
 
-    // Right
+    // Right: cuts -> BR
     for (const p of rightCuts) pts.push({x: p.x, y: p.y});
     pts.push(BR());
 
-    // Bottom: translate topCuts down by +S and reverse
+    // Bottom: translate topCuts by (0, +H) and reverse, travel BR -> BL
     for (let i = topCuts.length - 1; i >= 0; i--) {
       const p = topCuts[i];
-      pts.push({x: p.x, y: p.y + S});
+      pts.push({x: p.x, y: p.y + H});
     }
     pts.push(BL());
 
-    // Left: translate rightCuts left by -S and reverse
+    // Left: translate rightCuts by (-W, 0) and reverse, travel BL -> TL
     for (let i = rightCuts.length - 1; i >= 0; i--) {
       const p = rightCuts[i];
-      pts.push({x: p.x - S, y: p.y});
+      pts.push({x: p.x - W, y: p.y});
     }
+
     return pts;
   }
 
-  // ----- Drawing -----
   function drawGrid() {
     ctx.save();
     ctx.clearRect(0,0,canvas.width,canvas.height);
@@ -221,22 +230,22 @@
     ctx.restore();
   }
 
-  function drawSquare() {
+  function drawRect() {
     ctx.save();
     ctx.strokeStyle = "#333";
     ctx.lineWidth = 2;
-    ctx.strokeRect(ox+0.5, oy+0.5, S, S);
+    ctx.strokeRect(ox+0.5, oy+0.5, W, H);
 
     // band hints (including PAD outside)
     ctx.fillStyle = "rgba(80,120,255,0.08)";
-    // Top band: y from -PAD to S*0.45
-    ctx.fillRect(ox, oy - PAD, S, S * 0.45 + PAD);
-    // Right band: x from S*0.55 to S+PAD
-    ctx.fillRect(ox + S * 0.55, oy, S * 0.45 + PAD, S);
+    // Top band: from y=-PAD to y=0.45H
+    ctx.fillRect(ox, oy - PAD, W, H * 0.45 + PAD);
+    // Right band: from x=0.55W to x=W+PAD
+    ctx.fillRect(ox + W * 0.55, oy, W * 0.45 + PAD, H);
 
     ctx.fillStyle = "#333";
     ctx.font = "12px system-ui";
-    ctx.fillText("Square start", ox+6, oy-8);
+    ctx.fillText("Rectangle start", ox+6, oy-8);
     ctx.restore();
   }
 
@@ -266,39 +275,31 @@
     ctx.restore();
   }
 
-  function redraw() {
-    drawGrid();
-    drawSquare();
-    drawPolygon();
-    updateOutput();
-  }
-
-  // ----- Output (Quadrant IV) -----
-  function updateOutput() {
-    const pts = boundaryLocalPoints();
-    const q4 = pts.map(p => `(${round1(p.x)}, ${round1(-p.y)})`);
-    const poly = "polygon(\n  " + q4.join(",\n  ") + "\n)";
-    out.value = poly;
-  }
-
   function round1(n) {
     const r = Math.round(n * 10) / 10;
     return Number.isInteger(r) ? r.toString() : r.toString();
   }
 
-  // ----- Click handling -----
+  function updateOutput() {
+    const pts = boundaryLocalPoints();
+    // Quadrant IV output: (x, -y)
+    const q4 = pts.map(p => `(${round1(p.x)}, ${round1(-p.y)})`);
+    const poly = "polygon(\n  " + q4.join(",\n  ") + "\n)";
+    out.value = poly;
+  }
+
+  function redraw() {
+    drawGrid();
+    drawRect();
+    drawPolygon();
+    updateOutput();
+  }
+
   function canvasToLocal(evt) {
     const rect = canvas.getBoundingClientRect();
     const cx = evt.clientX - rect.left;
     const cy = evt.clientY - rect.top;
     return { x: cx - ox, y: cy - oy };
-  }
-
-  function clampPoint(p) {
-    return {
-      x: Math.max(-PAD, Math.min(S + PAD, p.x)),
-      y: Math.max(-PAD, Math.min(S + PAD, p.y)),
-    };
   }
 
   function addPoint(local) {
@@ -320,19 +321,25 @@
     addPoint(p);
   });
 
-  // ----- Controls -----
+  // Controls
   document.getElementById('modeTop').addEventListener('click', () => setMode("top"));
   document.getElementById('modeRight').addEventListener('click', () => setMode("right"));
   document.getElementById('undo').addEventListener('click', undo);
   document.getElementById('reset').addEventListener('click', reset);
 
   document.getElementById('apply').addEventListener('click', () => {
-    const ns = Number(document.getElementById('size').value);
+    pushHistory();
+
+    const nw = Number(document.getElementById('w').value);
+    const nh = Number(document.getElementById('h').value);
     const nox = Number(document.getElementById('ox').value);
     const noy = Number(document.getElementById('oy').value);
-    S = Math.max(100, Math.min(400, ns));
+
+    W = Math.max(50, Math.min(450, nw));
+    H = Math.max(50, Math.min(450, nh));
     ox = nox; oy = noy;
 
+    // Clamp existing points to new rectangle bounds (+PAD)
     topCuts = topCuts.map(clampPoint);
     rightCuts = rightCuts.map(clampPoint);
 
